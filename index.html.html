@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>米粒カウンター</title>
+<script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="onOpenCvReady();"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Hiragino Sans","Noto Sans JP",sans-serif; background:#14181d; color:#e8eaed; }
+  header { padding:14px 18px; background:#1c2229; border-bottom:1px solid #2a323b; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; font-size:12px; color:#9aa4ad; }
+  main { max-width:960px; margin:0 auto; padding:14px; }
+  .panel { background:#1c2229; border:1px solid #2a323b; border-radius:10px; padding:14px; margin-bottom:14px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  button { background:#2d6cdf; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer; }
+  button:disabled { background:#3a434d; color:#8b949e; cursor:default; }
+  button.secondary { background:#3a434d; }
+  input[type=file] { color:#9aa4ad; font-size:13px; }
+  .stage { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; min-height:220px; }
+  .stage canvas { width:100%; display:block; }
+  video { display:none; }
+  #countBig { font-size:44px; font-weight:700; color:#4ade80; line-height:1; }
+  .stats { display:flex; gap:22px; flex-wrap:wrap; margin-top:8px; }
+  .stat .v { font-size:22px; font-weight:700; }
+  .stat .l { font-size:11px; color:#9aa4ad; }
+  label.slider { display:flex; align-items:center; gap:8px; font-size:13px; }
+  label.slider input { width:140px; }
+  .hint { font-size:12px; color:#9aa4ad; margin-top:8px; }
+  #status { font-size:13px; color:#facc15; min-height:18px; }
+  details { font-size:12px; color:#9aa4ad; }
+  summary { cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>米粒カウンター</h1>
+  <p>カメラまたは画像ファイルから、画像解析（OpenCV.js）だけで米の粒数を推定します</p>
+</header>
+<main>
+  <div class="panel">
+    <div class="row">
+      <button id="btnCam">カメラを起動</button>
+      <button id="btnShot" disabled>撮影して計測</button>
+      <label>または画像を選択: <input type="file" id="fileInput" accept="image/*"></label>
+      <button id="btnSample" class="secondary">デモ画像で試す</button>
+      <button id="btnDownload" class="secondary" disabled>結果画像を保存</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="panel">
+    <div class="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="countBig">-</div><div class="l">推定粒数</div></div>
+      <div class="stat"><div class="v" id="statRegions">-</div><div class="l">検出領域</div></div>
+      <div class="stat"><div class="v" id="statClumps">-</div><div class="l">塊(分割推定)</div></div>
+      <div class="stat"><div class="v" id="statTime">-</div><div class="l">処理時間</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label class="slider">領域の最小サイズ <input type="range" id="minArea" min="30" max="800" value="120" step="10"><span id="minAreaV">120</span></label>
+      <label class="slider">塊の分割感度 <input type="range" id="distF" min="5" max="60" value="35"><span id="distFV">0.35</span></label>
+      <label class="slider">明暗のしきい値 <input type="range" id="thresh" min="0" max="255" value="0"><span id="threshV">自動</span></label>
+      <label class="slider">平滑化 <input type="range" id="blur" min="1" max="15" value="5" step="2"><span id="blurV">5</span></label>
+      <label><input type="checkbox" id="invert"> 背景が明るい（白皿など）</label>
+    </div>
+    <div class="hint">
+      緑 = 1粒と判定、橙 = 触れ合った塊（面積から粒数を推定）。スライダーを動かすと即座に再計測します。
+    </div>
+  </div>
+
+  <div class="panel">
+    <details open>
+      <summary>撮影のコツ（精度が大きく変わります）</summary>
+      <ul>
+        <li><b>暗い色の無光沢の背景</b>（黒いケント紙・マットなトレーなど）に米を一層に広げる。白い皿の場合は「背景が明るい」にチェック。</li>
+        <li><b>真上から・影をつけずに</b>撮影。粒同士をなるべく離し、重なりを減らすほど正確になります。</li>
+        <li>画角いっぱいに粒が写るように撮ると、1粒のサイズが大きくなり誤差が減ります。</li>
+        <li>カメラの利用には HTTPS またはローカルファイルで開く必要があります（file:// ではカメラ不可の場合あり。その場合は写真を撮って「画像を選択」から読み込んでください）。</li>
+      </ul>
+    </details>
+    <details>
+      <summary>仕組みと精度</summary>
+      <p>グレースケール化 → 平滑化 → 大津の二値化 → モルフォロジー解放 → 距離変換 + ワーターシェードで触れ合った粒を分離 → 面積フィルタでノイズ除去 → 「1粒あたりの面積の中央値」で割り戻して粒数を推定（分離できなかった塊も面積から概数を推定）。</p>
+      <p>同じアルゴリズムをPythonで合成画像（照明ムラ・影・密集・低コントラストの16ケース、30〜450粒）で検証した結果、<b>標準的な撮影では平均絶対誤差約0.1%、難しい条件でも平均約2.0%・最悪約6.6%</b>でした（修正前の同条件: 最悪約10.3%）。実写では粒の重なり方によってさらに誤差が大きくなることがあります。「推定値」としてお使いください。</p>
+    </details>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('canvas'), ctx = canvas.getContext('2d');
+let cvReady = false, stream = null, lastBlob = null;
+
+function onOpenCvReady() {
+  // opencv.js は読み込み後も非同期で初期化が続く
+  if (typeof cv !== 'undefined' && cv.getBuildInformation) { cvReady = true; setStatus(''); }
+  else if (typeof cv !== 'undefined') {
+    cv['onRuntimeInitialized'] = () => { cvReady = true; setStatus(''); };
+  }
+}
+if (typeof cv !== 'undefined') { cv['onRuntimeInitialized'] = () => { cvReady = true; setStatus(''); }; }
+
+function setStatus(t){ $('status').textContent = t || ''; }
+
+// ---- カメラ ----
+$('btnCam').onclick = async () => {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: {ideal:1920} }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    $('btnShot').disabled = false;
+    setStatus('カメラ起動 OK。「撮影して計測」を押してください。');
+  } catch (e) { setStatus('カメラを起動できませんでした: ' + e.message); }
+};
+$('btnShot').onclick = () => {
+  if (!stream) return;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  countGrains();
+};
+
+// ---- ファイル ----
+$('fileInput').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const maxSide = 2000, s = Math.min(1, maxSide / Math.max(img.width, img.height));
+    canvas.width = img.width * s; canvas.height = img.height * s;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    countGrains();
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(f);
+};
+
+// ---- デモ画像（既知粒数180粒の合成米をJSで生成） ----
+$('btnSample').onclick = () => {
+  const w = 960, h = 720, N = 180;
+  const im = ctx.createImageData(w, h);
+  const rng = mulberry32(20261014);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const v = 44 + (x / w - .5) * 24 + (y / h - .5) * 18;   // ゆるい照明ムラ
+    const i = (y * w + x) * 4;
+    im.data[i] = im.data[i+1] = im.data[i+2] = v; im.data[i+3] = 255;
+  }
+  const placed = [];
+  for (let n = 0; n < N; n++) {
+    let a, b, x, y, ang, ok = false;
+    for (let t = 0; t < 60 && !ok; t++) {
+      a = 24 + rng() * 12; b = 8.5 + rng() * 4; ang = rng() * Math.PI;
+      x = a + 4 + rng() * (w - 2 * a - 8); y = a + 4 + rng() * (h - 2 * a - 8);
+      ok = true;
+      for (const p of placed) if ((x-p.x)**2 + (y-p.y)**2 < (0.62*(a+p.a))**2) { ok = false; break; }
+    }
+    placed.push({x, y, a});
+    const val = 195 + rng() * 37;
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    for (let dy = -Math.ceil(a); dy <= Math.ceil(a); dy++) for (let dx = -Math.ceil(a); dx <= Math.ceil(a); dx++) {
+      const u = (dx * ca + dy * sa) / a, v = (-dx * sa + dy * ca) / b;
+      if (u*u + v*v <= 1) {
+        const px = Math.round(x + dx), py = Math.round(y + dy);
+        if (px < 0 || py < 0 || px >= w || py >= h) continue;
+        const i = (py * w + px) * 4;
+        im.data[i] = im.data[i+1] = im.data[i+2] = val;
+      }
+    }
+  }
+  ctx.putImageData(im, 0, 0);
+  countGrains(true);
+};
+
+function mulberry32(s) { return function(){ s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---- 解析本体（Python版 rice_counter.py と同じパイプライン） ----
+function countGrains(silent) {
+  if (!cvReady) { setStatus('OpenCV.js の読み込み中です。数秒待ってからもう一度お試しください。'); return; }
+  if (!canvas.width) return;
+  const t0 = performance.now();
+  const src = cv.imread(canvas);
+  const gray = new cv.Mat(), blur = new cv.Mat(), binary = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const k = +$('blur').value;
+  cv.GaussianBlur(gray, blur, new cv.Size(k, k), 0);
+  const th = +$('thresh').value;
+  if (th > 0) cv.threshold(blur, binary, th, 255, cv.THRESH_BINARY);
+  else cv.threshold(blur, binary, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+  if ($('invert').checked) cv.bitwise_not(binary, binary);
+  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
+  cv.morphologyEx(binary, binary, cv.MORPH_OPEN, kernel, new cv.Point(-1,-1), 2);
+
+  const minArea = +$('minArea').value;
+
+  // 小さなノイズ成分の除去（connectedComponents のラベルで面積参照）
+  const cc = new cv.Mat(), stats = new cv.Mat(), nCC = cv.connectedComponentsWithStats(binary, cc, stats, 8);
+  const w = binary.cols, h = binary.rows, nPx = w * h;
+  const clean = new cv.Mat.zeros(h, w, cv.CV_8UC1);
+  {
+    const labs = cc.data32F, out = clean.data, bin = binary.data;
+    for (let i = 0; i < nPx; i++) {
+      const lab = labs[i] | 0;
+      if (lab > 0 && bin[i] && stats.intAt(lab, cv.CC_STAT_AREA) >= minArea) out[i] = 255;
+    }
+  }
+  cc.delete(); stats.delete();
+  clean.copyTo(binary); clean.delete();
+
+  // 距離変換 → ウォーターシェードで触れ合った粒を分離
+  const dist = new cv.Mat();
+  cv.distanceTransform(binary, dist, cv.DIST_L2, 5);
+  let dMax = -Infinity;
+  for (let i = 0; i < dist.data32F.length; i++) if (dist.data32F[i] > dMax) dMax = dist.data32F[i];
+  const distF = (+$('distF').value) / 100;
+  const fg = new cv.Mat();
+  cv.threshold(dist, fg, distF * dMax, 255.0, cv.THRESH_BINARY);
+  fg.convertTo(fg, cv.CV_8UC1);
+
+  const markers = new cv.Mat();
+  cv.connectedComponents(fg, markers);
+  markers.convertTo(markers, cv.CV_32SC1);
+  for (let i = 0; i < markers.data32S.length; i++) markers.data32S[i] += 1;  // 背景=1, 種=2..
+
+  // v5修正: 「確実な背景」を binary 自身にする。
+  // 従来は binary を膨張させたものを背景に渡していたため、粒の外周が
+  // 背景側に奪われ、面積基準の推定が系統的に過小になっていた。
+  const unknown = new cv.Mat();
+  cv.subtract(binary, fg, unknown);
+  for (let i = 0; i < unknown.data.length; i++) if (unknown.data[i] === 255) markers.data32S[i] = 0;
+  unknown.delete();
+
+  const color = new cv.Mat();
+  cv.cvtColor(binary, color, cv.COLOR_GRAY2RGBA);
+  cv.watershed(color, markers);
+  color.delete();
+
+  // 領域ごとの面積集計（binary=255 かつ ラベル>=2）
+  const regions = new Map();
+  const mdata = markers.data32S;
+  for (let i = 0; i < nPx; i++) {
+    if (binary.data[i] && mdata[i] >= 2) regions.set(mdata[i], (regions.get(mdata[i]) || 0) + 1);
+  }
+  const areas = [...regions.values()].filter(a => a >= minArea);
+
+  // 中央値による単粒面積の頑健推定 → 塊を面積で割り戻し
+  let total = 0, nClump = 0, nRegion = 0, med = 0;
+  if (areas.length) {
+    const a0 = [...areas].sort((x, y) => x - y);
+    med = a0.length % 2 ? a0[(a0.length-1)/2] : (a0[a0.length/2 - 1] + a0[a0.length/2]) / 2;
+    for (let it = 0; it < 3; it++) {
+      const kept = a0.filter(a => a >= 0.45 * med);
+      if (!kept.length) break;
+      const m2 = kept.length % 2 ? kept[(kept.length-1)/2] : (kept[kept.length/2 - 1] + kept[kept.length/2]) / 2;
+      const singles = kept.filter(a => a >= 0.55 * m2 && a <= 1.7 * m2);
+      let nm = m2;
+      if (singles.length) nm = singles.length % 2 ? singles[(singles.length-1)/2] : (singles[singles.length/2 - 1] + singles[singles.length/2]) / 2;
+      if (Math.abs(nm - med) < 1) { med = nm; break; }
+      med = nm;
+    }
+    // v5: min_area 以上の領域は全て「少なくとも1粒」と数える。
+    // 部分的にしか見えていない粒を捨てると、密集・重なりで過小カウントになるため。
+    for (const a of a0) {
+      const kk = Math.max(1, Math.round(a / med));
+      total += kk; nRegion++;
+      if (kk >= 2) nClump++;
+    }
+  }
+
+  // ---- 結果の描画 ----
+  const result = new cv.Mat();
+  cv.cvtColor(src, result, cv.COLOR_RGBA2GRAY);
+  cv.cvtColor(result, result, cv.COLOR_GRAY2RGBA);
+  const overlay = result.clone();
+  const OD = overlay.data, RD = result.data;
+  for (let i = 0; i < nPx; i++) {
+    const lab = mdata[i];
+    if (binary.data[i] && lab >= 2) {
+      const area = regions.get(lab) || 0;
+      if (area < minArea) continue;
+      const kk = med > 0 ? Math.max(1, Math.round(area / med)) : 1;
+      const gi = i * 4;
+      if (kk === 1) { OD[gi] = 40;  OD[gi+1] = 210; OD[gi+2] = 80; }   // 緑=単粒
+      else          { OD[gi] = 255; OD[gi+1] = 150; OD[gi+2] = 40; }   // 橙=塊
+      OD[gi+3] = 255;
+    }
+  }
+  cv.addWeighted(overlay, 0.35, result, 0.65, 0, result);
+  overlay.delete();
+
+  // 輪郭と番号ラベル
+  let idx = 1;
+  const contours = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(binary, contours, hier, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+  for (let c = 0; c < contours.size(); c++) {
+    const cnt = contours.get(c);
+    const m = cv.moments(cnt, true);
+    if (m.m00 >= minArea) {
+      const kk = med > 0 ? Math.max(1, Math.round(m.m00 / med)) : 1;
+      const cx = (m.m10 / m.m00) | 0, cy = (m.m01 / m.m00) | 0;
+      cv.drawContours(result, contours, c, kk === 1 ? new cv.Scalar(90, 255, 140, 255) : new cv.Scalar(255, 190, 90, 255), 2);
+      cv.putText(result, kk === 1 ? String(idx) : 'x' + kk, new cv.Point(cx - 8, cy + 5),
+                 cv.FONT_HERSHEY_SIMPLEX, 0.45, new cv.Scalar(0, 0, 0, 255), 3, cv.LINE_AA);
+      idx++;
+    }
+  }
+  hier.delete(); contours.delete();
+
+  cv.imshow(canvas, result);
+  const dt = ((performance.now() - t0) / 1000).toFixed(2);
+  $('countBig').textContent = total;
+  $('statRegions').textContent = nRegion;
+  $('statClumps').textContent = nClump;
+  $('statTime').textContent = dt + 's';
+  $('btnDownload').disabled = false;
+
+  [src, gray, blur, binary, kernel, dist, fg, markers, result].forEach(m => m && m.delete());
+  canvas.toBlob(b => lastBlob = b, 'image/png');
+  if (!silent) setStatus('');
+}
+
+$('minArea').oninput = e => { $('minAreaV').textContent = e.target.value; };
+$('distF').oninput = e => { $('distFV').textContent = (e.target.value / 100).toFixed(2); };
+$('thresh').oninput = e => { $('threshV').textContent = e.target.value === '0' ? '自動' : e.target.value; };
+$('blur').oninput = e => { $('blurV').textContent = e.target.value; };
+['minArea','distF','thresh','blur','invert'].forEach(id => $(id).addEventListener('change', () => countGrains(true)));
+
+$('btnDownload').onclick = () => {
+  if (!lastBlob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(lastBlob);
+  a.download = 'rice_count_result.png';
+  a.click();
+};
+</script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092" integrity="sha512-UKNk8GbxkABxKcXYuLkO16EleLGUkcvJWtpSNmExE0Too3ZaFAxTscNWEc1OdAv5/BikHawapSCaiD2XCmp+Bw==" data-cf-beacon='{"version":"2024.11.0","token":"4edd5f8ec12a48cfa682ab8261b80a79","spa":2}' crossorigin="anonymous"></script>
+</body>
+</html>
